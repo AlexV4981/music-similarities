@@ -1,0 +1,23 @@
+# Core ML
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.36.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+numpy>=1.24.0
+
+# Vector search
+faiss-cpu>=1.7.4
+
+# Web
+flask>=3.0.0
+flask-cors>=4.0.0
+werkzeug>=3.0.0
+
+# Metadata
+mutagen>=1.47.0
+
+# Utilities
+tqdm>=4.65.0

@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vibecheck — Music Recommender</title>
+<style>
+  /* ── Tokens ─────────────────────────────────────────────── */
+  :root {
+    --bg:        #0d0f14;
+    --surface:   #151820;
+    --surface2:  #1c2030;
+    --border:    #252a38;
+    --violet:    #7c5cfc;
+    --violet-dim:#3d2e7c;
+    --violet-glow: rgba(124,92,252,0.18);
+    --green:     #3ddc97;
+    --amber:     #f5a623;
+    --red:       #e05c5c;
+    --text:      #e8eaf0;
+    --text-dim:  #6b7280;
+    --text-mid:  #9ca3af;
+    --mono:      'JetBrains Mono', 'Fira Mono', 'Courier New', monospace;
+    --sans:      'Inter', system-ui, -apple-system, sans-serif;
+    --radius:    10px;
+    --radius-sm: 6px;
+  }
+
+  /* ── Reset ──────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 15px; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+  a { color: var(--violet); text-decoration: none; }
+  button { cursor: pointer; font-family: inherit; }
+  input, select { font-family: inherit; }
+
+  /* ── Layout ─────────────────────────────────────────────── */
+  .app {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 20px 80px;
+  }
+
+  /* ── Header ─────────────────────────────────────────────── */
+  header {
+    padding: 36px 0 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .logo-mark {
+    width: 36px; height: 36px;
+    background: var(--violet);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .logo-mark svg { width: 20px; height: 20px; fill: #fff; }
+  h1 {
+    font-size: 1.3rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+  h1 span { color: var(--violet); }
+
+  /* Status pill */
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 0.78rem;
+    color: var(--text-mid);
+    font-family: var(--mono);
+  }
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot.green  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.amber  { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+  .dot.red    { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+
+  /* ── Section titles ──────────────────────────────────────── */
+  .section-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+
+  /* ── Upload zone ─────────────────────────────────────────── */
+  .upload-section { margin-top: 32px; }
+
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 48px 24px;
+    text-align: center;
+    transition: border-color 0.15s, background 0.15s;
+    cursor: pointer;
+    position: relative;
+  }
+  .drop-zone:hover,
+  .drop-zone.drag-over {
+    border-color: var(--violet);
+    background: var(--surface2);
+  }
+  .drop-zone input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+  }
+  .drop-icon {
+    width: 44px; height: 44px;
+    margin: 0 auto 14px;
+    opacity: 0.5;
+  }
+  .drop-zone h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .drop-zone p {
+    font-size: 0.82rem;
+    color: var(--text-dim);
+  }
+  .drop-zone .formats {
+    margin-top: 10px;
+    font-size: 0.72rem;
+    font-family: var(--mono);
+    color: var(--violet);
+    opacity: 0.7;
+  }
+
+  /* selected file name */
+  .file-chosen {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+  }
+  .file-chosen .fname {
+    font-size: 0.85rem;
+    font-family: var(--mono);
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-chosen .clear-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 2px 4px;
+    flex-shrink: 0;
+  }
+  .file-chosen .clear-btn:hover { color: var(--red); }
+
+  /* controls row */
+  .controls-row {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .top-n-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.82rem;
+    color: var(--text-mid);
+  }
+  .top-n-wrap select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 5px 8px;
+    font-size: 0.82rem;
+  }
+
+  /* primary button */
+  .btn-primary {
+    background: var(--violet);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 9px 22px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  .btn-primary:hover:not(:disabled) { opacity: 0.88; }
+  .btn-primary:active:not(:disabled) { transform: scale(0.98); }
+  .btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  /* secondary button */
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text-mid);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 16px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .btn-secondary:hover { border-color: var(--violet); color: var(--violet); }
+
+  /* ── Loading state ───────────────────────────────────────── */
+  .loading-bar-wrap {
+    margin-top: 20px;
+    display: none;
+  }
+  .loading-bar-wrap.visible { display: block; }
+  .loading-label {
+    font-size: 0.78rem;
+    font-family: var(--mono);
+    color: var(--text-mid);
+    margin-bottom: 6px;
+  }
+  .loading-bar {
+    height: 3px;
+    background: var(--surface2);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+  .loading-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--violet);
+    border-radius: 99px;
+    animation: indeterminate 1.4s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0%   { width: 0%;   margin-left: 0%; }
+    50%  { width: 60%;  margin-left: 20%; }
+    100% { width: 0%;   margin-left: 100%; }
+  }
+
+  /* ── Error / warning banners ─────────────────────────────── */
+  .banner {
+    margin-top: 16px;
+    padding: 11px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 0.83rem;
+    display: none;
+  }
+  .banner.visible { display: block; }
+  .banner.error   { background: rgba(224,92,92,0.12); border: 1px solid rgba(224,92,92,0.3); color: #f59090; }
+  .banner.warning { background: rgba(245,166,35,0.10); border: 1px solid rgba(245,166,35,0.3); color: #f5c97a; }
+  .banner.success { background: rgba(61,220,151,0.10); border: 1px solid rgba(61,220,151,0.3); color: #6eebc0; }
+
+  /* ── Results ─────────────────────────────────────────────── */
+  .results-section { margin-top: 36px; }
+
+  .results-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .results-meta {
+    font-size: 0.78rem;
+    font-family: var(--mono);
+    color: var(--text-dim);
+  }
+
+  .result-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 8px;
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 14px;
+    align-items: start;
+    transition: border-color 0.12s;
+  }
+  .result-card:hover { border-color: var(--violet-dim); }
+
+  .result-rank {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    padding-top: 2px;
+    text-align: right;
+  }
+
+  .result-info { min-width: 0; }
+  .result-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 3px;
+  }
+  .result-meta {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .result-meta span { color: var(--text-mid); }
+
+  /* VU meter score bar — the signature element */
+  .result-score-col {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    min-width: 80px;
+  }
+  .score-pct {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--violet);
+    line-height: 1;
+  }
+  .score-pct.low { color: var(--amber); }
+  .vu-bar {
+    width: 80px;
+    height: 5px;
+    background: var(--surface2);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+  .vu-fill {
+    height: 100%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, var(--violet-dim), var(--violet));
+    width: 0%;
+    transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .vu-fill.low {
+    background: linear-gradient(90deg, #7a4800, var(--amber));
+  }
+  .result-duration {
+    font-size: 0.72rem;
+    font-family: var(--mono);
+    color: var(--text-dim);
+  }
+
+  /* ── Library tab ─────────────────────────────────────────── */
+  .tabs {
+    margin-top: 48px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 0;
+  }
+  .tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 10px 18px;
+    margin-bottom: -1px;
+    transition: color 0.12s, border-color 0.12s;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--violet); border-bottom-color: var(--violet); }
+
+  .tab-panel { display: none; margin-top: 20px; }
+  .tab-panel.active { display: block; }
+
+  /* library table */
+  .lib-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .lib-search {
+    flex: 1;
+    min-width: 180px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 7px 12px;
+    font-size: 0.83rem;
+  }
+  .lib-search:focus { outline: none; border-color: var(--violet); }
+  .lib-search::placeholder { color: var(--text-dim); }
+
+  .lib-table-wrap {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    overflow-x: auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+  thead th {
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody td {
+    padding: 10px 14px;
+    color: var(--text-mid);
+    max-width: 220px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  tbody td:first-child { color: var(--text); font-weight: 500; }
+  .dur-cell { font-family: var(--mono); font-size: 0.75rem; text-align: right; }
+
+  /* ── Reindex panel ───────────────────────────────────────── */
+  .reindex-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-top: 4px;
+  }
+  .reindex-panel p {
+    font-size: 0.83rem;
+    color: var(--text-mid);
+    margin-bottom: 14px;
+  }
+  .reindex-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .dir-input {
+    flex: 1;
+    min-width: 220px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 8px 12px;
+    font-size: 0.83rem;
+    font-family: var(--mono);
+  }
+  .dir-input:focus { outline: none; border-color: var(--violet); }
+  .dir-input::placeholder { color: var(--text-dim); }
+  .update-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    color: var(--text-mid);
+    cursor: pointer;
+  }
+  .update-check input { accent-color: var(--violet); }
+
+  /* empty state */
+  .empty-state {
+    text-align: center;
+    padding: 48px 20px;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+  }
+  .empty-state strong { display: block; color: var(--text-mid); margin-bottom: 6px; font-size: 0.95rem; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header>
+    <div class="logo">
+      <div class="logo-mark">
+        <svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
+      </div>
+      <h1>Vibe<span>check</span></h1>
+    </div>
+    <div class="status-pill" id="statusPill">
+      <span class="dot amber" id="statusDot"></span>
+      <span id="statusText">Connecting…</span>
+    </div>
+  </header>
+
+  <!-- Upload -->
+  <section class="upload-section">
+    <div class="section-label">Upload a song to match</div>
+
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept=".mp3,.wav,.flac,.ogg,.m4a,.aac,.wma">
+      <div class="drop-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-dim)">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </div>
+      <h2>Drop an audio file here</h2>
+      <p>or click to browse</p>
+      <div class="formats">mp3 · wav · flac · ogg · m4a · aac · wma</div>
+    </div>
+
+    <div class="file-chosen" id="fileChosen" style="display:none">
+      <span class="fname" id="chosenName"></span>
+      <button class="clear-btn" id="clearBtn" title="Remove file">✕</button>
+    </div>
+
+    <div class="controls-row">
+      <button class="btn-primary" id="analyzeBtn" disabled>Find matches</button>
+      <div class="top-n-wrap">
+        Show
+        <select id="topN">
+          <option value="5">5</option>
+          <option value="10" selected>10</option>
+          <option value="20">20</option>
+          <option value="50">50</option>
+        </select>
+        results
+      </div>
+    </div>
+
+    <div class="loading-bar-wrap" id="loadingWrap">
+      <div class="loading-label" id="loadingLabel">Extracting audio features…</div>
+      <div class="loading-bar"><div class="loading-bar-fill"></div></div>
+    </div>
+
+    <div class="banner error"   id="errorBanner"></div>
+    <div class="banner warning" id="warnBanner"></div>
+    <div class="banner success" id="successBanner"></div>
+  </section>
+
+  <!-- Results -->
+  <section class="results-section" id="resultsSection" style="display:none">
+    <div class="results-header">
+      <div class="section-label" style="margin-bottom:0">Top matches</div>
+      <div class="results-meta" id="resultsMeta"></div>
+    </div>
+    <div id="resultsList"></div>
+  </section>
+
+  <!-- Tabs: Library / Settings -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="library">Library</button>
+    <button class="tab-btn" data-tab="reindex">Re-index</button>
+  </div>
+
+  <!-- Library tab -->
+  <div class="tab-panel active" id="tab-library">
+    <div class="lib-controls">
+      <input class="lib-search" id="libSearch" type="search" placeholder="Search by title or artist…">
+      <button class="btn-secondary" id="refreshLibBtn">Refresh</button>
+    </div>
+    <div class="lib-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Artist</th>
+            <th>Album</th>
+            <th style="text-align:right">Duration</th>
+          </tr>
+        </thead>
+        <tbody id="libBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Reindex tab -->
+  <div class="tab-panel" id="tab-reindex">
+    <div class="reindex-panel">
+      <p>Point this at your music folder to build or update the search index. The first run can take a while — CLAP processes each song on CPU.</p>
+      <div class="reindex-row">
+        <input class="dir-input" id="musicDir" type="text" placeholder="/home/user/Music">
+        <label class="update-check">
+          <input type="checkbox" id="updateOnly" checked>
+          Skip unchanged files
+        </label>
+        <button class="btn-primary" id="reindexBtn">Start indexing</button>
+      </div>
+      <div class="banner" id="reindexBanner" style="margin-top:14px"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API = 'http://localhost:5000';
+
+// ── State ─────────────────────────────────────────────────────
+let selectedFile  = null;
+let allLibSongs   = [];
+let statusPoller  = null;
+
+// ── DOM refs ──────────────────────────────────────────────────
+const fileInput     = document.getElementById('fileInput');
+const dropZone      = document.getElementById('dropZone');
+const fileChosen    = document.getElementById('fileChosen');
+const chosenName    = document.getElementById('chosenName');
+const clearBtn      = document.getElementById('clearBtn');
+const analyzeBtn    = document.getElementById('analyzeBtn');
+const topN          = document.getElementById('topN');
+const loadingWrap   = document.getElementById('loadingWrap');
+const loadingLabel  = document.getElementById('loadingLabel');
+const errorBanner   = document.getElementById('errorBanner');
+const warnBanner    = document.getElementById('warnBanner');
+const successBanner = document.getElementById('successBanner');
+const resultsSection= document.getElementById('resultsSection');
+const resultsList   = document.getElementById('resultsList');
+const resultsMeta   = document.getElementById('resultsMeta');
+const libBody       = document.getElementById('libBody');
+const libSearch     = document.getElementById('libSearch');
+const statusDot     = document.getElementById('statusDot');
+const statusText    = document.getElementById('statusText');
+const reindexBtn    = document.getElementById('reindexBtn');
+const reindexBanner = document.getElementById('reindexBanner');
+const musicDirInput = document.getElementById('musicDir');
+
+// ── Helpers ───────────────────────────────────────────────────
+function showBanner(el, msg) {
+  [errorBanner, warnBanner, successBanner].forEach(b => {
+    b.classList.remove('visible');
+    b.textContent = '';
+  });
+  if (el && msg) { el.textContent = msg; el.classList.add('visible'); }
+}
+
+function setLoading(active, label = 'Extracting audio features…') {
+  loadingLabel.textContent = label;
+  loadingWrap.classList.toggle('visible', active);
+  analyzeBtn.disabled = active || !selectedFile;
+  fileInput.disabled  = active;
+}
+
+function fmtDuration(secs) {
+  if (!secs) return '—';
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function setFile(file) {
+  selectedFile         = file;
+  chosenName.textContent = file.name;
+  fileChosen.style.display = 'flex';
+  analyzeBtn.disabled  = false;
+  showBanner(null);
+  resultsSection.style.display = 'none';
+}
+
+function clearFile() {
+  selectedFile = null;
+  fileInput.value = '';
+  fileChosen.style.display = 'none';
+  analyzeBtn.disabled = true;
+  showBanner(null);
+}
+
+// ── Status polling ────────────────────────────────────────────
+async function fetchStatus() {
+  try {
+    const res  = await fetch(`${API}/status`);
+    const data = await res.json();
+
+    if (!data.index_ready) {
+      statusDot.className  = 'dot red';
+      statusText.textContent = 'No index — run indexer first';
+    } else if (!data.in_sync) {
+      statusDot.className  = 'dot amber';
+      statusText.textContent = `⚠ index out of sync (${data.index_size} vs ${data.db_song_count})`;
+    } else {
+      statusDot.className  = 'dot green';
+      statusText.textContent = `${data.db_song_count} songs indexed`;
+    }
+
+    // Reindex progress
+    if (data.reindex_running) {
+      showReindexBanner('running', 'Indexing in progress… check back in a moment.');
+    } else if (data.last_reindex_result === 'success') {
+      showReindexBanner('success', 'Index updated successfully.');
+      loadLibrary();
+    } else if (data.last_reindex_result?.startsWith('error:')) {
+      showReindexBanner('error', data.last_reindex_result);
+    }
+
+    return data;
+  } catch {
+    statusDot.className  = 'dot red';
+    statusText.textContent = 'Cannot reach backend';
+  }
+}
+
+function showReindexBanner(type, msg) {
+  reindexBanner.className = `banner ${type === 'running' ? 'warning' : type === 'success' ? 'success' : 'error'} visible`;
+  reindexBanner.textContent = msg;
+}
+
+// ── File drop / select ────────────────────────────────────────
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer?.files[0];
+  if (file) setFile(file);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) setFile(fileInput.files[0]);
+});
+clearBtn.addEventListener('click', clearFile);
+
+// ── Analyze ───────────────────────────────────────────────────
+analyzeBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  setLoading(true, 'Extracting audio features — this takes ~15–30s…');
+  showBanner(null);
+  resultsSection.style.display = 'none';
+
+  const form = new FormData();
+  form.append('file', selectedFile);
+  form.append('top_n', topN.value);
+
+  try {
+    const res  = await fetch(`${API}/upload`, { method: 'POST', body: form });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showBanner(errorBanner, data.error || 'Upload failed.');
+      return;
+    }
+
+    if (data.low_confidence_warning) {
+      showBanner(warnBanner, 'Low confidence — best matches are below 60% similarity. This song may not fit your library well.');
+    } else {
+      showBanner(successBanner, `Found ${data.result_count} matches for "${data.query_filename}"`);
+    }
+
+    renderResults(data.results);
+
+  } catch (err) {
+    showBanner(errorBanner, `Network error: ${err.message}`);
+  } finally {
+    setLoading(false);
+  }
+});
+
+// ── Results rendering ─────────────────────────────────────────
+function renderResults(results) {
+  if (!results.length) {
+    resultsList.innerHTML = '<div class="empty-state"><strong>No results</strong>Library may be empty or index needs rebuilding.</div>';
+    resultsSection.style.display = 'block';
+    return;
+  }
+
+  resultsMeta.textContent = `${results.length} songs · sorted by similarity`;
+  resultsList.innerHTML = results.map(r => `
+    <div class="result-card">
+      <div class="result-rank">#${r.rank}</div>
+      <div class="result-info">
+        <div class="result-title">${esc(r.title)}</div>
+        <div class="result-meta"><span>${esc(r.artist)}</span>${r.album !== 'Unknown Album' ? ` · ${esc(r.album)}` : ''}</div>
+      </div>
+      <div class="result-score-col">
+        <div class="score-pct ${r.low_confidence ? 'low' : ''}">${r.score_pct}</div>
+        <div class="vu-bar"><div class="vu-fill ${r.low_confidence ? 'low' : ''}" data-score="${r.score}"></div></div>
+        <div class="result-duration">${fmtDuration(r.duration)}</div>
+      </div>
+    </div>
+  `).join('');
+
+  resultsSection.style.display = 'block';
+
+  // Animate VU bars after paint
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      document.querySelectorAll('.vu-fill').forEach(el => {
+        el.style.width = `${parseFloat(el.dataset.score) * 100}%`;
+      });
+    });
+  });
+}
+
+function esc(str) {
+  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Library ───────────────────────────────────────────────────
+async function loadLibrary() {
+  try {
+    const res  = await fetch(`${API}/library`);
+    const data = await res.json();
+    allLibSongs = data.songs || [];
+    renderLibrary(allLibSongs);
+  } catch {
+    libBody.innerHTML = '<tr><td colspan="4" style="color:var(--text-dim);padding:20px">Could not load library.</td></tr>';
+  }
+}
+
+function renderLibrary(songs) {
+  if (!songs.length) {
+    libBody.innerHTML = '<tr><td colspan="4"><div class="empty-state"><strong>No songs indexed yet</strong>Use the Re-index tab to scan your music folder.</div></td></tr>';
+    return;
+  }
+  libBody.innerHTML = songs.map(s => `
+    <tr>
+      <td title="${esc(s.title)}">${esc(s.title)}</td>
+      <td title="${esc(s.artist)}">${esc(s.artist)}</td>
+      <td title="${esc(s.album)}">${esc(s.album)}</td>
+      <td class="dur-cell">${fmtDuration(s.duration)}</td>
+    </tr>
+  `).join('');
+}
+
+libSearch.addEventListener('input', () => {
+  const q = libSearch.value.toLowerCase();
+  renderLibrary(allLibSongs.filter(s =>
+    s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q)
+  ));
+});
+
+document.getElementById('refreshLibBtn').addEventListener('click', loadLibrary);
+
+// ── Reindex ───────────────────────────────────────────────────
+reindexBtn.addEventListener('click', async () => {
+  const dir = musicDirInput.value.trim();
+  if (!dir) { showReindexBanner('error', 'Enter a music directory path.'); return; }
+
+  reindexBtn.disabled = true;
+  showReindexBanner('running', 'Starting indexer…');
+
+  try {
+    const res  = await fetch(`${API}/reindex`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ music_dir: dir, update: document.getElementById('updateOnly').checked }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showReindexBanner('error', data.error || 'Failed to start.');
+    } else {
+      showReindexBanner('running', data.message);
+      // Poll status until done
+      const poll = setInterval(async () => {
+        const s = await fetchStatus();
+        if (s && !s.reindex_running) { clearInterval(poll); reindexBtn.disabled = false; }
+      }, 3000);
+    }
+  } catch (err) {
+    showReindexBanner('error', `Network error: ${err.message}`);
+    reindexBtn.disabled = false;
+  }
+});
+
+// ── Tabs ──────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+  });
+});
+
+// ── Init ──────────────────────────────────────────────────────
+fetchStatus();
+loadLibrary();
+setInterval(fetchStatus, 10000);   // re-check status every 10s
+</script>
+</body>
+</html>

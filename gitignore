@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+data/library.db
+data/vectors.index
+data/id_map.json
+uploads/
+.env
+*.egg-info/
