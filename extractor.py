@@ -190,11 +190,19 @@ def get_embedding(filepath: str) -> np.ndarray:
     audio = _load_audio(filepath)
 
     # CLAP processor expects a list of waveforms + the sample rate
-    inputs = _processor(
-        audios=[audio],
-        sampling_rate=SAMPLE_RATE,
-        return_tensors="pt",
-    )
+    # newer transformers uses `audio`, older used `audios` — try both
+    try:
+        inputs = _processor(
+            audio=[audio],
+            sampling_rate=SAMPLE_RATE,
+            return_tensors="pt",
+        )
+    except TypeError:
+        inputs = _processor(
+            audios=[audio],
+            sampling_rate=SAMPLE_RATE,
+            return_tensors="pt",
+        )
 
     with torch.no_grad():
         embedding = _model.get_audio_features(**inputs)   # shape: (1, EMBEDDING_DIM)
