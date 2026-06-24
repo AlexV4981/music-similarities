@@ -208,18 +208,28 @@ def get_embedding(filepath: str) -> np.ndarray:
     audio_keys = {k: v for k, v in inputs.items() if k in ("input_features", "is_longer")}
 
     with torch.no_grad():
-        embedding = _model.get_audio_features(**audio_keys)   # shape: (1, EMBEDDING_DIM)
+        output = _model.get_audio_features(**audio_keys)
 
-    # Flatten safely regardless of output shape
-    vector = embedding.squeeze().cpu().numpy().astype(np.float32)
+    # get_audio_features can return either:
+    #   - a raw tensor of shape (1, EMBEDDING_DIM)
+    #   - a BaseModelOutputWithPooling object (access .pooler_output or .last_hidden_state)
+    import torch
+    if isinstance(output, torch.Tensor):
+        tensor = output
+    elif hasattr(output, "pooler_output") and output.pooler_output is not None:
+        tensor = output.pooler_output
+    elif hasattr(output, "last_hidden_state"):
+        # Mean-pool across the sequence dimension
+        tensor = output.last_hidden_state.mean(dim=1)
+    else:
+        raise RuntimeError(f"Unrecognised output type from get_audio_features: {type(output)}")
 
-    # If model returned (EMBEDDING_DIM,) already, squeeze is fine.
-    # If it returned (1, EMBEDDING_DIM), squeeze gives (EMBEDDING_DIM,).
-    # Guard against a fully scalar result just in case.
-    if vector.ndim == 0:
-        raise RuntimeError(f"Embedding collapsed to scalar for file: {filepath}")
+    # Flatten safely to 1D regardless of batch dimension
+    vector = tensor.squeeze().cpu().numpy().astype(np.float32)
     if vector.ndim > 1:
         vector = vector[0]
+    if vector.ndim == 0:
+        raise RuntimeError(f"Embedding collapsed to scalar for file: {filepath}")
 
     # L2-normalise so cosine similarity == dot product (required for FAISS IndexFlatIP)
     norm = np.linalg.norm(vector)
@@ -230,7 +240,7 @@ def get_embedding(filepath: str) -> np.ndarray:
     if vector.shape[0] != EMBEDDING_DIM:
         raise RuntimeError(
             f"Unexpected embedding dimension: got {vector.shape[0]}, expected {EMBEDDING_DIM}\n"
-            f"Raw embedding shape before squeeze: {embedding.shape}"
+            f"Raw tensor shape before squeeze: {tensor.shape}"
         )
     if np.isnan(vector).any():
         raise RuntimeError(f"Embedding contains NaN values for file: {filepath}")
