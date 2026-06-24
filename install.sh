@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
 # install.sh — musemender one-shot setup for Ubuntu
-# Run once from inside the musemender directory:
+# Can be run from anywhere:
+#   bash ~/musemender/install.sh
 #   cd musemender && bash install.sh
 # =============================================================================
 set -euo pipefail
+
+# ── Always work from the directory this script lives in ──────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -15,14 +20,15 @@ success() { echo -e "${GREEN}[✓]${RESET} $*"; }
 warn()    { echo -e "${YELLOW}[!]${RESET} $*"; }
 fail()    { echo -e "${RED}[✗] $*${RESET}"; exit 1; }
 
-echo -e "\n${BOLD}musemender — install${RESET}\n"
+echo -e "\n${BOLD}musemender — install${RESET}"
+echo -e "Working directory: $SCRIPT_DIR\n"
 
-# ── 1. Must run from the musemender root ─────────────────────────────────────
+# ── Sanity check — make sure backend files are present ───────────────────────
 if [[ ! -f "backend/app.py" ]]; then
-    fail "Run this from inside the musemender directory:\n    cd musemender && bash install.sh"
+    fail "backend/app.py not found in $SCRIPT_DIR\nMake sure all project files are in place before running install."
 fi
 
-# ── 2. Python version check (3.10+ required) ─────────────────────────────────
+# ── 1. Python version check (3.10+ required) ─────────────────────────────────
 info "Checking Python version..."
 PY=$(command -v python3 || true)
 if [[ -z "$PY" ]]; then
@@ -38,39 +44,38 @@ if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10
 fi
 success "Python $PY_VER"
 
-# ── 3. System packages ────────────────────────────────────────────────────────
+# ── 2. System packages ────────────────────────────────────────────────────────
 info "Installing system packages (ffmpeg, python3-venv)..."
 sudo apt-get update -qq
 sudo apt-get install -y -qq ffmpeg python3-venv python3-pip
 success "System packages installed"
 
-# ── 4. Virtual environment ────────────────────────────────────────────────────
+# ── 3. Virtual environment ────────────────────────────────────────────────────
 if [[ -d "venv" ]]; then
-    warn "venv already exists — skipping creation. Delete it and re-run to start fresh."
+    warn "venv already exists — skipping creation. Delete venv/ and re-run to start fresh."
 else
     info "Creating virtual environment..."
     $PY -m venv venv
-    success "Virtual environment created at ./venv"
+    success "Virtual environment created at $SCRIPT_DIR/venv"
 fi
 
 source venv/bin/activate
 
-# ── 5. Pip packages ───────────────────────────────────────────────────────────
+# ── 4. Pip packages ───────────────────────────────────────────────────────────
 info "Upgrading pip..."
 pip install --upgrade pip --quiet
 
-info "Installing Python packages (this will take a few minutes on first run)..."
-info "  torch + torchaudio are large — ~800MB download"
+info "Installing Python packages (this will take a few minutes — torch is ~800MB)..."
 pip install -r requirements.txt
 
 success "Python packages installed"
 
-# ── 6. Required directories ───────────────────────────────────────────────────
-info "Ensuring required directories exist..."
+# ── 5. Required runtime directories ──────────────────────────────────────────
+info "Ensuring runtime directories exist..."
 mkdir -p data uploads
-success "Directories: data/, uploads/"
+success "Directories ready: data/  uploads/"
 
-# ── 7. Verify critical imports ────────────────────────────────────────────────
+# ── 6. Verify critical imports ────────────────────────────────────────────────
 info "Verifying imports..."
 python3 - <<'PYCHECK'
 import sys
@@ -109,7 +114,7 @@ PYCHECK
 
 success "All imports verified"
 
-# ── 8. ffmpeg check ───────────────────────────────────────────────────────────
+# ── 7. ffmpeg check ───────────────────────────────────────────────────────────
 if command -v ffmpeg &>/dev/null; then
     FFMPEG_VER=$(ffmpeg -version 2>&1 | head -1 | awk '{print $3}')
     success "ffmpeg $FFMPEG_VER"
@@ -124,14 +129,14 @@ echo ""
 echo -e "${BOLD}Next steps:${RESET}"
 echo ""
 echo -e "  ${CYAN}1. Index your music library:${RESET}"
-echo -e "     bash index.sh /path/to/your/Music"
+echo -e "     bash $SCRIPT_DIR/index.sh /path/to/your/Music"
 echo ""
 echo -e "  ${CYAN}2. Start the app:${RESET}"
-echo -e "     bash start.sh"
+echo -e "     bash $SCRIPT_DIR/start.sh"
 echo ""
 echo -e "  ${CYAN}3. Open in browser:${RESET}"
 echo -e "     http://localhost:5000"
 echo ""
-echo -e "  ${YELLOW}Note: The first index run downloads the CLAP model (~600MB).${RESET}"
-echo -e "  ${YELLOW}Each song takes 15-45s to embed on CPU — run it overnight for large libraries.${RESET}"
+echo -e "  ${YELLOW}Note: First index run downloads the CLAP model (~600MB).${RESET}"
+echo -e "  ${YELLOW}Each song takes 15-45s to embed on CPU.${RESET}"
 echo ""
