@@ -204,10 +204,22 @@ def get_embedding(filepath: str) -> np.ndarray:
             return_tensors="pt",
         )
 
-    with torch.no_grad():
-        embedding = _model.get_audio_features(**inputs)   # shape: (1, EMBEDDING_DIM)
+    # Only pass the audio input keys — strip any unexpected keys the processor adds
+    audio_keys = {k: v for k, v in inputs.items() if k in ("input_features", "is_longer")}
 
-    vector = embedding[0].cpu().numpy().astype(np.float32)
+    with torch.no_grad():
+        embedding = _model.get_audio_features(**audio_keys)   # shape: (1, EMBEDDING_DIM)
+
+    # Flatten safely regardless of output shape
+    vector = embedding.squeeze().cpu().numpy().astype(np.float32)
+
+    # If model returned (EMBEDDING_DIM,) already, squeeze is fine.
+    # If it returned (1, EMBEDDING_DIM), squeeze gives (EMBEDDING_DIM,).
+    # Guard against a fully scalar result just in case.
+    if vector.ndim == 0:
+        raise RuntimeError(f"Embedding collapsed to scalar for file: {filepath}")
+    if vector.ndim > 1:
+        vector = vector[0]
 
     # L2-normalise so cosine similarity == dot product (required for FAISS IndexFlatIP)
     norm = np.linalg.norm(vector)
@@ -217,7 +229,8 @@ def get_embedding(filepath: str) -> np.ndarray:
     # Sanity check
     if vector.shape[0] != EMBEDDING_DIM:
         raise RuntimeError(
-            f"Unexpected embedding dimension: got {vector.shape[0]}, expected {EMBEDDING_DIM}"
+            f"Unexpected embedding dimension: got {vector.shape[0]}, expected {EMBEDDING_DIM}\n"
+            f"Raw embedding shape before squeeze: {embedding.shape}"
         )
     if np.isnan(vector).any():
         raise RuntimeError(f"Embedding contains NaN values for file: {filepath}")
