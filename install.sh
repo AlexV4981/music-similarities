@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # install.sh — musemender one-shot setup for Ubuntu
-# Can be run from anywhere:
-#   bash ~/musemender/install.sh
-#   cd musemender && bash install.sh
+# Works whether files are flat in musemender/ or already in subfolders.
 # =============================================================================
 set -euo pipefail
 
@@ -23,12 +21,73 @@ fail()    { echo -e "${RED}[✗] $*${RESET}"; exit 1; }
 echo -e "\n${BOLD}musemender — install${RESET}"
 echo -e "Working directory: $SCRIPT_DIR\n"
 
-# ── Sanity check — make sure backend files are present ───────────────────────
-if [[ ! -f "backend/app.py" ]]; then
-    fail "backend/app.py not found in $SCRIPT_DIR\nMake sure all project files are in place before running install."
+# ── 1. Create subdirectory structure ─────────────────────────────────────────
+info "Creating directory structure..."
+mkdir -p backend frontend data uploads
+success "Directories ready"
+
+# ── 2. Move flat files into correct subfolders if needed ─────────────────────
+BACKEND_FILES=(app.py config.py db.py extractor.py indexer.py similarity.py)
+FRONTEND_FILES=(index.html)
+
+MOVED=0
+
+for f in "${BACKEND_FILES[@]}"; do
+    if [[ -f "$SCRIPT_DIR/$f" ]]; then
+        mv "$SCRIPT_DIR/$f" "$SCRIPT_DIR/backend/$f"
+        info "  Moved $f → backend/"
+        MOVED=$((MOVED + 1))
+    fi
+done
+
+for f in "${FRONTEND_FILES[@]}"; do
+    if [[ -f "$SCRIPT_DIR/$f" ]]; then
+        mv "$SCRIPT_DIR/$f" "$SCRIPT_DIR/frontend/$f"
+        info "  Moved $f → frontend/"
+        MOVED=$((MOVED + 1))
+    fi
+done
+
+if [[ $MOVED -gt 0 ]]; then
+    success "Moved $MOVED file(s) into correct subfolders"
+else
+    info "Files already in subfolders — nothing to move"
 fi
 
-# ── 1. Python version check (3.10+ required) ─────────────────────────────────
+# ── 3. Verify all required files are present ─────────────────────────────────
+info "Checking all required files..."
+
+MISSING=()
+for f in "${BACKEND_FILES[@]}"; do
+    if [[ ! -f "backend/$f" ]]; then
+        MISSING+=("backend/$f")
+    fi
+done
+for f in "${FRONTEND_FILES[@]}"; do
+    if [[ ! -f "frontend/$f" ]]; then
+        MISSING+=("frontend/$f")
+    fi
+done
+if [[ ! -f "requirements.txt" ]]; then
+    MISSING+=("requirements.txt")
+fi
+
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+    echo -e "${RED}[✗] The following required files are missing:${RESET}"
+    for f in "${MISSING[@]}"; do
+        echo -e "    ${RED}✗${RESET}  $f"
+    done
+    echo ""
+    echo -e "    Make sure you downloaded all files from the project before running install."
+    echo -e "    Expected files in $SCRIPT_DIR:"
+    echo -e "      app.py  config.py  db.py  extractor.py  indexer.py  similarity.py"
+    echo -e "      index.html  requirements.txt  install.sh  start.sh  index.sh"
+    exit 1
+fi
+
+success "All required files present"
+
+# ── 4. Python version check (3.10+ required) ─────────────────────────────────
 info "Checking Python version..."
 PY=$(command -v python3 || true)
 if [[ -z "$PY" ]]; then
@@ -44,13 +103,13 @@ if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10
 fi
 success "Python $PY_VER"
 
-# ── 2. System packages ────────────────────────────────────────────────────────
+# ── 5. System packages ────────────────────────────────────────────────────────
 info "Installing system packages (ffmpeg, python3-venv)..."
 sudo apt-get update -qq
 sudo apt-get install -y -qq ffmpeg python3-venv python3-pip
 success "System packages installed"
 
-# ── 3. Virtual environment ────────────────────────────────────────────────────
+# ── 6. Virtual environment ────────────────────────────────────────────────────
 if [[ -d "venv" ]]; then
     warn "venv already exists — skipping creation. Delete venv/ and re-run to start fresh."
 else
@@ -61,21 +120,15 @@ fi
 
 source venv/bin/activate
 
-# ── 4. Pip packages ───────────────────────────────────────────────────────────
+# ── 7. Pip packages ───────────────────────────────────────────────────────────
 info "Upgrading pip..."
 pip install --upgrade pip --quiet
 
 info "Installing Python packages (this will take a few minutes — torch is ~800MB)..."
 pip install -r requirements.txt
-
 success "Python packages installed"
 
-# ── 5. Required runtime directories ──────────────────────────────────────────
-info "Ensuring runtime directories exist..."
-mkdir -p data uploads
-success "Directories ready: data/  uploads/"
-
-# ── 6. Verify critical imports ────────────────────────────────────────────────
+# ── 8. Verify critical imports ────────────────────────────────────────────────
 info "Verifying imports..."
 python3 - <<'PYCHECK'
 import sys
@@ -114,7 +167,7 @@ PYCHECK
 
 success "All imports verified"
 
-# ── 7. ffmpeg check ───────────────────────────────────────────────────────────
+# ── 9. ffmpeg check ───────────────────────────────────────────────────────────
 if command -v ffmpeg &>/dev/null; then
     FFMPEG_VER=$(ffmpeg -version 2>&1 | head -1 | awk '{print $3}')
     success "ffmpeg $FFMPEG_VER"
