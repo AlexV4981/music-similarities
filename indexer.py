@@ -1,25 +1,25 @@
 """
-indexer.py — Bulk library indexer
+indexer.py — Batch music library indexer
 
-Walks a music directory, extracts CLAP embeddings, and stores:
-  - Metadata → SQLite (via db.py)
-  - Embedding vectors → FAISS index (vectors.index)
-  - FAISS row ID → DB song ID map → id_map.json
+Architecture (based on SO/batch processing best practices):
+  - Files are split into chunks of BATCH_SIZE using a generator
+  - Each batch: embed all songs → bulk insert to SQLite via executemany → 
+    add vectors to FAISS → save checkpoint to disk
+  - Only one batch lives in memory at a time
+  - A crash mid-run loses at most one batch (50 songs), not everything
 
 Run modes:
-  python indexer.py /path/to/music          # full index
-  python indexer.py /path/to/music --update # skip already-indexed unchanged files
-  python indexer.py /path/to/music --clean  # remove stale DB entries for deleted files
-
-The FAISS index uses IndexFlatIP (inner product on L2-normalised vectors = cosine similarity).
-Vectors are appended in DB insertion order so FAISS row i == songs.id i.
-The id_map bridges the two: id_map[faiss_row] = db_song_id.
+  python indexer.py /path/to/music            # full index
+  python indexer.py /path/to/music --update   # skip unchanged files
+  python indexer.py /path/to/music --clean    # remove deleted files from index
 """
 
 import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
+from typing import Generator
 
 import faiss
 import numpy as np
@@ -41,73 +41,74 @@ from extractor import (
     get_embedding,
 )
 
+BATCH_SIZE = 50   # process → index → save to disk every N songs
+
+
+# ---------------------------------------------------------------------------
+# Batch item dataclass — holds everything for one song through the pipeline
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SongItem:
+    filepath:  str
+    title:     str
+    artist:    str
+    album:     str
+    duration:  float
+    file_hash: str
+    vector:    np.ndarray
+    db_id:     int | None = None   # set after DB insert
+
 
 # ---------------------------------------------------------------------------
 # Metadata extraction
 # ---------------------------------------------------------------------------
 
 def _extract_metadata(filepath: str) -> dict:
-    """
-    Pull title, artist, album, duration from file tags via mutagen.
-    Falls back to filename / 'Unknown' if tags are missing.
-    Never raises — bad metadata is not a reason to skip a song.
-    """
+    """Pull tags from file. Falls back to filename / 'Unknown' — never raises."""
     meta = {
-        "title": os.path.splitext(os.path.basename(filepath))[0],
-        "artist": "Unknown Artist",
-        "album": "Unknown Album",
+        "title":    os.path.splitext(os.path.basename(filepath))[0],
+        "artist":   "Unknown Artist",
+        "album":    "Unknown Album",
         "duration": 0.0,
     }
-
     try:
         tags = MutagenFile(filepath, easy=True)
         if tags is None:
             return meta
-
         def _first(key):
             val = tags.get(key)
             return val[0].strip() if val else None
-
-        meta["title"]  = _first("title")  or meta["title"]
-        meta["artist"] = _first("artist") or meta["artist"]
-        meta["album"]  = _first("album")  or meta["album"]
-
+        meta["title"]    = _first("title")  or meta["title"]
+        meta["artist"]   = _first("artist") or meta["artist"]
+        meta["album"]    = _first("album")  or meta["album"]
         if hasattr(tags, "info") and hasattr(tags.info, "length"):
             meta["duration"] = float(tags.info.length)
-
     except Exception:
-        pass   # silently fall back to defaults
-
+        pass
     return meta
 
 
 # ---------------------------------------------------------------------------
-# FAISS index helpers
+# FAISS helpers
 # ---------------------------------------------------------------------------
 
 def _new_index() -> faiss.IndexFlatIP:
-    """Create a fresh FAISS inner-product index."""
     return faiss.IndexFlatIP(EMBEDDING_DIM)
 
-
 def _load_index() -> faiss.IndexFlatIP:
-    """Load existing index from disk, or create a new one if not found."""
     if os.path.exists(FAISS_INDEX_PATH):
         return faiss.read_index(FAISS_INDEX_PATH)
     return _new_index()
 
-
 def _save_index(index: faiss.IndexFlatIP) -> None:
     faiss.write_index(index, FAISS_INDEX_PATH)
 
-
 def _load_id_map() -> dict:
-    """id_map: { str(faiss_row): db_song_id }"""
     if os.path.exists(FAISS_ID_MAP_PATH):
         with open(FAISS_ID_MAP_PATH) as f:
             return json.load(f)
     return {}
-
 
 def _save_id_map(id_map: dict) -> None:
     with open(FAISS_ID_MAP_PATH, "w") as f:
@@ -115,16 +116,173 @@ def _save_id_map(id_map: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# File collection
+# ---------------------------------------------------------------------------
+
+def _collect_audio_files(music_dir: str) -> list[str]:
+    found = []
+    for root, _, files in os.walk(music_dir):
+        for fname in files:
+            if os.path.splitext(fname)[1].lower() in SUPPORTED_FORMATS:
+                found.append(os.path.join(root, fname))
+    return sorted(found)
+
+
+# ---------------------------------------------------------------------------
+# Batch generator
+# Yields lists of BATCH_SIZE filepaths at a time — only one batch in memory
+# Pattern from: https://stackoverflow.com/a/8991553
+# ---------------------------------------------------------------------------
+
+def _batched(items: list, size: int) -> Generator[list, None, None]:
+    """Split a list into chunks of `size`. Yields each chunk as a list."""
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
+# ---------------------------------------------------------------------------
+# Single-batch processor
+# Embed → bulk DB insert via executemany → add to FAISS → checkpoint to disk
+# ---------------------------------------------------------------------------
+
+def _process_batch(
+    filepaths:   list[str],
+    index:       faiss.IndexFlatIP,
+    id_map:      dict,
+    update_only: bool,
+    pbar:        tqdm,
+) -> tuple[int, int, int, list]:
+    """
+    Process one batch of up to BATCH_SIZE songs.
+
+    Returns (added, skipped, errors, error_log_entries)
+    """
+    added    = 0
+    skipped  = 0
+    errors   = 0
+    err_log  = []
+
+    # ── Phase 1: filter + embed ───────────────────────────────────────────────
+    # Build list of SongItems for songs that need embedding.
+    # Songs that are unchanged (--update) are skipped here.
+    to_embed:      list[tuple[str, object | None]] = []   # (filepath, existing_row)
+    skip_filepaths: set[str] = set()
+
+    for filepath in filepaths:
+        existing = db.is_indexed(filepath)
+        if update_only and existing:
+            current_hash = db.hash_file(filepath)
+            if current_hash == existing["file_hash"]:
+                skip_filepaths.add(filepath)
+                skipped += 1
+                pbar.update(1)
+                continue
+        to_embed.append((filepath, existing))
+
+    # ── Phase 2: extract embeddings ───────────────────────────────────────────
+    embedded: list[SongItem] = []
+
+    for filepath, existing in to_embed:
+        try:
+            vector = get_embedding(filepath)
+        except (AudioLoadError, AudioTooShortError,
+                SilentAudioError, UnsupportedFormatError) as e:
+            errors += 1
+            err_log.append((filepath, str(e)))
+            pbar.update(1)
+            continue
+        except Exception as e:
+            errors += 1
+            err_log.append((filepath, f"Unexpected: {e}"))
+            pbar.update(1)
+            continue
+
+        meta      = _extract_metadata(filepath)
+        file_hash = db.hash_file(filepath)
+
+        item = SongItem(
+            filepath  = filepath,
+            title     = meta["title"],
+            artist    = meta["artist"],
+            album     = meta["album"],
+            duration  = meta["duration"],
+            file_hash = file_hash,
+            vector    = vector,
+            db_id     = existing["id"] if existing else None,
+        )
+        embedded.append(item)
+
+    if not embedded:
+        return added, skipped, errors, err_log
+
+    # ── Phase 3: bulk DB write (executemany — much faster than one-by-one) ───
+    # Pattern: https://remusao.github.io/posts/few-tips-sqlite-perf.html
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+
+    new_items      = [it for it in embedded if it.db_id is None]
+    updated_items  = [it for it in embedded if it.db_id is not None]
+
+    # Bulk insert new songs
+    if new_items:
+        rows = [
+            (it.filepath, it.file_hash, it.title, it.artist,
+             it.album, it.duration, now)
+            for it in new_items
+        ]
+        conn = db._connect()
+        cursor = conn.executemany(
+            """INSERT OR IGNORE INTO songs
+               (filepath, file_hash, title, artist, album, duration, indexed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        conn.commit()
+
+        # Fetch the IDs that were just inserted
+        placeholders = ",".join("?" * len(new_items))
+        id_rows = conn.execute(
+            f"SELECT id, filepath FROM songs WHERE filepath IN ({placeholders})",
+            [it.filepath for it in new_items],
+        ).fetchall()
+        path_to_id = {r["filepath"]: r["id"] for r in id_rows}
+        for it in new_items:
+            it.db_id = path_to_id.get(it.filepath)
+
+    # Bulk update changed files
+    if updated_items:
+        conn = db._connect()
+        conn.executemany(
+            "UPDATE songs SET file_hash = ?, indexed_at = ? WHERE id = ?",
+            [(it.file_hash, now, it.db_id) for it in updated_items],
+        )
+        conn.commit()
+
+    # ── Phase 4: add vectors to FAISS + update id_map ────────────────────────
+    valid = [it for it in embedded if it.db_id is not None]
+    if valid:
+        vectors = np.stack([it.vector for it in valid]).astype(np.float32)
+        index.add(vectors)   # add whole batch at once — faster than one-by-one
+        for it in valid:
+            faiss_row = index.ntotal - len(valid) + valid.index(it)
+            id_map[str(faiss_row)] = it.db_id
+        added += len(valid)
+
+    # ── Phase 5: checkpoint to disk after every batch ─────────────────────────
+    _save_index(index)
+    _save_id_map(id_map)
+
+    for _ in embedded:
+        pbar.update(1)
+
+    return added, skipped, errors, err_log
+
+
+# ---------------------------------------------------------------------------
 # Stale entry cleanup
 # ---------------------------------------------------------------------------
 
 def clean_stale_entries() -> int:
-    """
-    Remove DB rows whose files no longer exist on disk.
-    Returns count of removed entries.
-    Note: does NOT rebuild the FAISS index — run a full re-index after cleaning
-    if you want FAISS to shrink too (IndexFlatIP doesn't support deletion).
-    """
     all_paths = db.get_all_filepaths()
     stale = [p for p in all_paths if not os.path.exists(p)]
     for path in stale:
@@ -137,166 +295,100 @@ def clean_stale_entries() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Core indexer
+# Main indexer
 # ---------------------------------------------------------------------------
 
-def _collect_audio_files(music_dir: str) -> list[str]:
-    """Walk music_dir recursively and return all supported audio file paths."""
-    found = []
-    for root, _, files in os.walk(music_dir):
-        for fname in files:
-            if os.path.splitext(fname)[1].lower() in SUPPORTED_FORMATS:
-                found.append(os.path.join(root, fname))
-    return sorted(found)
-
-
 def run_index(music_dir: str, update_only: bool = False) -> None:
-    """
-    Main indexing routine.
-
-    Args:
-        music_dir:   Root directory of your music library.
-        update_only: If True, skip files already in DB whose hash hasn't changed.
-                     If False, re-index everything (rebuilds FAISS from scratch).
-    """
     if not os.path.isdir(music_dir):
         print(f"[indexer] ERROR: '{music_dir}' is not a directory.")
         sys.exit(1)
 
     db.init_db()
+    db.open_session()
 
-    audio_files = _collect_audio_files(music_dir)
-    if not audio_files:
-        print(f"[indexer] No supported audio files found in '{music_dir}'.")
-        sys.exit(0)
+    try:
+        audio_files = _collect_audio_files(music_dir)
+        if not audio_files:
+            print(f"[indexer] No supported audio files found in '{music_dir}'.")
+            return
 
-    print(f"[indexer] Found {len(audio_files)} audio files.")
+        total = len(audio_files)
+        batches = list(_batched(audio_files, BATCH_SIZE))
+        n_batches = len(batches)
 
-    if update_only:
-        # Load existing index and id_map to append to
-        index  = _load_index()
-        id_map = _load_id_map()
-        print(f"[indexer] --update mode: existing index has {index.ntotal} vectors.")
-    else:
-        # Full rebuild — start fresh
-        index  = _new_index()
-        id_map = {}
-        print("[indexer] Full re-index: building from scratch.")
+        print(f"[indexer] Found {total} audio files → {n_batches} batches of up to {BATCH_SIZE}")
 
-    skipped   = 0
-    added     = 0
-    errors    = 0
-    error_log = []
-
-    for filepath in tqdm(audio_files, desc="Indexing", unit="song"):
-        existing = db.is_indexed(filepath)
-
-        if update_only and existing:
-            # Check if the file has changed since last index
-            current_hash = db.hash_file(filepath)
-            if current_hash == existing["file_hash"]:
-                skipped += 1
-                continue
-            # File changed — re-embed but reuse existing DB row
-            # (Can't update FAISS in place; we add a new vector and update the map)
-            try:
-                vector = get_embedding(filepath)
-            except (AudioLoadError, AudioTooShortError, SilentAudioError, UnsupportedFormatError) as e:
-                errors += 1
-                error_log.append((filepath, str(e)))
-                continue
-
-            faiss_row = index.ntotal
-            index.add(np.expand_dims(vector, 0))
-            id_map[str(faiss_row)] = existing["id"]
-            db.update_song_hash(existing["id"], current_hash)
-            added += 1
-            continue
-
-        if existing and not update_only:
-            # Full rebuild — existing row will be re-inserted below;
-            # but we need to skip duplicate inserts. Just re-embed.
-            pass
-
-        # New file — extract embedding + metadata
-        try:
-            vector = get_embedding(filepath)
-        except (AudioLoadError, AudioTooShortError, SilentAudioError, UnsupportedFormatError) as e:
-            errors += 1
-            error_log.append((filepath, str(e)))
-            continue
-        except Exception as e:
-            errors += 1
-            error_log.append((filepath, f"Unexpected: {e}"))
-            continue
-
-        meta      = _extract_metadata(filepath)
-        file_hash = db.hash_file(filepath)
-
-        if existing and not update_only:
-            # Full rebuild: update hash, reuse id
-            db.update_song_hash(existing["id"], file_hash)
-            song_id = existing["id"]
+        if update_only:
+            index  = _load_index()
+            id_map = _load_id_map()
+            print(f"[indexer] --update mode: existing index has {index.ntotal} vectors.")
         else:
-            try:
-                song_id = db.insert_song(
-                    filepath  = filepath,
-                    file_hash = file_hash,
-                    title     = meta["title"],
-                    artist    = meta["artist"],
-                    album     = meta["album"],
-                    duration  = meta["duration"],
+            index  = _new_index()
+            id_map = {}
+            print("[indexer] Full re-index: building from scratch.")
+
+        total_added   = 0
+        total_skipped = 0
+        total_errors  = 0
+        all_errors    = []
+
+        with tqdm(total=total, desc="Indexing", unit="song") as pbar:
+            for batch_num, batch in enumerate(batches, 1):
+                pbar.set_description(f"Batch {batch_num}/{n_batches}")
+
+                added, skipped, errors, err_log = _process_batch(
+                    filepaths   = batch,
+                    index       = index,
+                    id_map      = id_map,
+                    update_only = update_only,
+                    pbar        = pbar,
                 )
-            except Exception as e:
-                errors += 1
-                error_log.append((filepath, f"DB insert failed: {e}"))
-                continue
 
-        faiss_row = index.ntotal
-        index.add(np.expand_dims(vector, 0))   # shape must be (1, EMBEDDING_DIM)
-        id_map[str(faiss_row)] = song_id
-        added += 1
+                total_added   += added
+                total_skipped += skipped
+                total_errors  += errors
+                all_errors    += err_log
 
-    # Persist
-    _save_index(index)
-    _save_id_map(id_map)
+                tqdm.write(
+                    f"  Batch {batch_num}/{n_batches} — "
+                    f"added: {added}  skipped: {skipped}  errors: {errors}  "
+                    f"[index total: {index.ntotal}]"
+                )
 
-    # Summary
+    finally:
+        db.close_session()
+
     print(f"\n[indexer] Done.")
-    print(f"  Added/updated : {added}")
-    print(f"  Skipped       : {skipped}")
-    print(f"  Errors        : {errors}")
+    print(f"  Added/updated : {total_added}")
+    print(f"  Skipped       : {total_skipped}")
+    print(f"  Errors        : {total_errors}")
     print(f"  Total in index: {index.ntotal}")
 
-    if error_log:
+    if all_errors:
         print(f"\n[indexer] Files that failed:")
-        for path, reason in error_log:
+        for path, reason in all_errors:
             print(f"  {os.path.basename(path)}: {reason}")
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Index your music library for similarity search.")
+    parser = argparse.ArgumentParser(description="Index your music library.")
     parser.add_argument("music_dir", help="Path to your music folder")
-    parser.add_argument(
-        "--update",
-        action="store_true",
-        help="Only process new or changed files (faster for incremental updates)",
-    )
-    parser.add_argument(
-        "--clean",
-        action="store_true",
-        help="Remove DB entries for files that no longer exist, then exit",
-    )
+    parser.add_argument("--update", action="store_true",
+                        help="Only process new or changed files")
+    parser.add_argument("--clean",  action="store_true",
+                        help="Remove DB entries for deleted files, then exit")
     args = parser.parse_args()
 
     if args.clean:
         db.init_db()
+        db.open_session()
         removed = clean_stale_entries()
-        print(f"Cleaned {removed} stale entries. Run without --clean to re-index.")
+        db.close_session()
+        print(f"Cleaned {removed} stale entries.")
         sys.exit(0)
 
     run_index(music_dir=args.music_dir, update_only=args.update)
