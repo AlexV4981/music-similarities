@@ -263,9 +263,16 @@ def method_not_allowed(_):
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def _startup_checks():
+    """Run once at startup regardless of server (Flask dev or Gunicorn)."""
     db.init_db()
-    print(f"[app] Starting Flask on http://localhost:{FLASK_PORT}")
     print(f"[app] Index ready: {similarity.is_ready()}")
     print(f"[app] Songs in DB: {db.get_song_count()}")
+
+_startup_checks()
+
+if __name__ == "__main__":
+    # Direct python run — dev only, use start.sh for production (Gunicorn)
+    print(f"[app] Starting Flask dev server on http://localhost:{FLASK_PORT}")
+    print(f"[app] For better performance run: bash start.sh")
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=False)
