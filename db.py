@@ -4,16 +4,16 @@ db.py — SQLite operations for the music library
 Schema:
     songs table — one row per indexed song
         id          INTEGER PRIMARY KEY
-        filepath    TEXT UNIQUE        — absolute path on disk
-        file_hash   TEXT               — MD5 of file, detects moves/renames
+        filepath    TEXT UNIQUE
+        file_hash   TEXT
         title       TEXT
         artist      TEXT
         album       TEXT
-        duration    REAL               — seconds
-        indexed_at  TEXT               — ISO timestamp
+        duration    REAL
+        indexed_at  TEXT — ISO timestamp
 
-All writes go through this module. FAISS holds the vectors;
-SQLite holds the metadata. They stay in sync via song.id == FAISS row index.
+Uses a persistent connection during indexing sessions to avoid
+hammering the OS with open/close calls for 500+ songs.
 """
 
 import hashlib
@@ -22,17 +22,79 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
-from config import DB_PATH
+from config import DB_PATH, DATA_DIR
 
 
 # ---------------------------------------------------------------------------
-# Connection helper
+# Persistent connection (used by indexer for bulk operations)
 # ---------------------------------------------------------------------------
+
+_persistent_conn: Optional[sqlite3.Connection] = None
+
+
+def open_session() -> None:
+    """
+    Open a persistent DB connection for a bulk indexing session.
+    Call this at the start of indexer.run_index(), close_session() at the end.
+    Avoids opening/closing hundreds of connections for large libraries.
+    """
+    global _persistent_conn
+    _ensure_data_dir()
+    conn = sqlite3.connect(DB_PATH, timeout=60, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")   # safe concurrent reads during write
+    conn.execute("PRAGMA synchronous=NORMAL") # faster writes, still safe
+    conn.execute("PRAGMA cache_size=-64000")  # 64MB cache for large libraries
+    _persistent_conn = conn
+
+
+def close_session() -> None:
+    """Close the persistent connection after a bulk indexing session."""
+    global _persistent_conn
+    if _persistent_conn:
+        _persistent_conn.commit()
+        _persistent_conn.close()
+        _persistent_conn = None
+
+
+# ---------------------------------------------------------------------------
+# Connection helper — uses persistent conn if open, else opens a new one
+# ---------------------------------------------------------------------------
+
+def _ensure_data_dir() -> None:
+    """Make sure the data directory exists and is writable."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except OSError as e:
+        raise sqlite3.OperationalError(
+            f"Cannot create data directory '{DATA_DIR}': {e}\n"
+            f"Try: sudo mkdir -p {DATA_DIR} && sudo chown $(whoami) {DATA_DIR}"
+        )
+    if not os.access(DATA_DIR, os.W_OK):
+        raise sqlite3.OperationalError(
+            f"Data directory is not writable: '{DATA_DIR}'\n"
+            f"Try: sudo chown -R $(whoami) {DATA_DIR}"
+        )
+
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row   # lets callers do row["title"] instead of row[2]
+    """
+    Return the active connection.
+    Uses the persistent session connection if one is open (indexer mode),
+    otherwise opens a fresh short-lived connection (Flask API mode).
+    """
+    if _persistent_conn is not None:
+        return _persistent_conn
+
+    _ensure_data_dir()
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _is_session_conn(conn: sqlite3.Connection) -> bool:
+    return conn is _persistent_conn
 
 
 # ---------------------------------------------------------------------------
@@ -41,28 +103,31 @@ def _connect() -> sqlite3.Connection:
 
 def init_db() -> None:
     """Create tables if they don't exist. Safe to call multiple times."""
-    with _connect() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS songs (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                filepath    TEXT    NOT NULL UNIQUE,
-                file_hash   TEXT    NOT NULL,
-                title       TEXT    NOT NULL DEFAULT 'Unknown Title',
-                artist      TEXT    NOT NULL DEFAULT 'Unknown Artist',
-                album       TEXT    NOT NULL DEFAULT 'Unknown Album',
-                duration    REAL    NOT NULL DEFAULT 0.0,
-                indexed_at  TEXT    NOT NULL
-            )
-        """)
-        conn.commit()
+    _ensure_data_dir()
+    conn = _connect()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS songs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            filepath    TEXT    NOT NULL UNIQUE,
+            file_hash   TEXT    NOT NULL,
+            title       TEXT    NOT NULL DEFAULT 'Unknown Title',
+            artist      TEXT    NOT NULL DEFAULT 'Unknown Artist',
+            album       TEXT    NOT NULL DEFAULT 'Unknown Album',
+            duration    REAL    NOT NULL DEFAULT 0.0,
+            indexed_at  TEXT    NOT NULL
+        )
+    """)
+    conn.commit()
+    if not _is_session_conn(conn):
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
-# File hashing — used to detect changed/moved files
+# File hashing
 # ---------------------------------------------------------------------------
 
 def hash_file(filepath: str, chunk_size: int = 65536) -> str:
-    """Return MD5 hex digest of a file. Reads in chunks to handle large files."""
+    """Return MD5 hex digest of a file."""
     h = hashlib.md5()
     with open(filepath, "rb") as f:
         while chunk := f.read(chunk_size):
@@ -82,40 +147,43 @@ def insert_song(
     album: str,
     duration: float,
 ) -> int:
-    """
-    Insert a new song row. Returns the new row id.
-    Raises sqlite3.IntegrityError if filepath already exists — callers should
-    check is_indexed() first or use upsert_song() for re-index flows.
-    """
+    """Insert a new song row. Returns the new row id."""
     now = datetime.now(timezone.utc).isoformat()
-    with _connect() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO songs (filepath, file_hash, title, artist, album, duration, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (filepath, file_hash, title, artist, album, duration, now),
-        )
-        conn.commit()
-        return cursor.lastrowid
+    conn = _connect()
+    cursor = conn.execute(
+        """
+        INSERT INTO songs (filepath, file_hash, title, artist, album, duration, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (filepath, file_hash, title, artist, album, duration, now),
+    )
+    conn.commit()
+    row_id = cursor.lastrowid
+    if not _is_session_conn(conn):
+        conn.close()
+    return row_id
 
 
 def update_song_hash(song_id: int, file_hash: str) -> None:
-    """Update the stored hash after a file has been re-indexed."""
+    """Update stored hash after a file has been re-indexed."""
     now = datetime.now(timezone.utc).isoformat()
-    with _connect() as conn:
-        conn.execute(
-            "UPDATE songs SET file_hash = ?, indexed_at = ? WHERE id = ?",
-            (file_hash, now, song_id),
-        )
-        conn.commit()
+    conn = _connect()
+    conn.execute(
+        "UPDATE songs SET file_hash = ?, indexed_at = ? WHERE id = ?",
+        (file_hash, now, song_id),
+    )
+    conn.commit()
+    if not _is_session_conn(conn):
+        conn.close()
 
 
 def delete_song(song_id: int) -> None:
-    """Remove a stale song row (file no longer exists on disk)."""
-    with _connect() as conn:
-        conn.execute("DELETE FROM songs WHERE id = ?", (song_id,))
-        conn.commit()
+    """Remove a stale song row."""
+    conn = _connect()
+    conn.execute("DELETE FROM songs WHERE id = ?", (song_id,))
+    conn.commit()
+    if not _is_session_conn(conn):
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -123,39 +191,48 @@ def delete_song(song_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def is_indexed(filepath: str) -> Optional[sqlite3.Row]:
-    """
-    Return the song row if this filepath is already in the DB, else None.
-    Callers use the returned row to check if the hash has changed.
-    """
-    with _connect() as conn:
-        return conn.execute(
-            "SELECT * FROM songs WHERE filepath = ?", (filepath,)
-        ).fetchone()
+    """Return the song row if this filepath is in the DB, else None."""
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM songs WHERE filepath = ?", (filepath,)
+    ).fetchone()
+    if not _is_session_conn(conn):
+        conn.close()
+    return row
 
 
 def get_song_by_id(song_id: int) -> Optional[sqlite3.Row]:
-    with _connect() as conn:
-        return conn.execute(
-            "SELECT * FROM songs WHERE id = ?", (song_id,)
-        ).fetchone()
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM songs WHERE id = ?", (song_id,)
+    ).fetchone()
+    if not _is_session_conn(conn):
+        conn.close()
+    return row
 
 
 def get_all_songs() -> list:
-    """Return all songs ordered by artist then title."""
-    with _connect() as conn:
-        return conn.execute(
-            "SELECT * FROM songs ORDER BY artist, title"
-        ).fetchall()
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM songs ORDER BY artist, title"
+    ).fetchall()
+    if not _is_session_conn(conn):
+        conn.close()
+    return rows
 
 
 def get_song_count() -> int:
-    with _connect() as conn:
-        row = conn.execute("SELECT COUNT(*) FROM songs").fetchone()
-        return row[0]
+    conn = _connect()
+    row = conn.execute("SELECT COUNT(*) FROM songs").fetchone()
+    if not _is_session_conn(conn):
+        conn.close()
+    return row[0]
 
 
 def get_all_filepaths() -> set:
     """Return set of all indexed filepaths — used to detect stale entries."""
-    with _connect() as conn:
-        rows = conn.execute("SELECT filepath FROM songs").fetchall()
-        return {row["filepath"] for row in rows}
+    conn = _connect()
+    rows = conn.execute("SELECT filepath FROM songs").fetchall()
+    if not _is_session_conn(conn):
+        conn.close()
+    return {row["filepath"] for row in rows}
