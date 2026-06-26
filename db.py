@@ -11,6 +11,12 @@ Schema:
         album       TEXT
         duration    REAL
         indexed_at  TEXT — ISO timestamp
+        valence     REAL  0.0-1.0 emotional positivity (NULL if not yet computed)
+        energy      REAL  0.0-1.0 intensity/loudness
+        danceability REAL 0.0-1.0 how groovy/danceable
+        bpm         REAL  beats per minute
+        key         INTEGER 0-11 (C=0 ... B=11)
+        mode        INTEGER 1=major 0=minor
 
 Uses a persistent connection during indexing sessions to avoid
 hammering the OS with open/close calls for 500+ songs.
@@ -102,21 +108,48 @@ def _is_session_conn(conn: sqlite3.Connection) -> bool:
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """Create tables if they don't exist. Safe to call multiple times."""
+    """Create tables if they don't exist. Migrates existing DBs to add new columns."""
     _ensure_data_dir()
     conn = _connect()
+
+    # Create table with full schema
     conn.execute("""
         CREATE TABLE IF NOT EXISTS songs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            filepath    TEXT    NOT NULL UNIQUE,
-            file_hash   TEXT    NOT NULL,
-            title       TEXT    NOT NULL DEFAULT 'Unknown Title',
-            artist      TEXT    NOT NULL DEFAULT 'Unknown Artist',
-            album       TEXT    NOT NULL DEFAULT 'Unknown Album',
-            duration    REAL    NOT NULL DEFAULT 0.0,
-            indexed_at  TEXT    NOT NULL
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            filepath     TEXT    NOT NULL UNIQUE,
+            file_hash    TEXT    NOT NULL,
+            title        TEXT    NOT NULL DEFAULT 'Unknown Title',
+            artist       TEXT    NOT NULL DEFAULT 'Unknown Artist',
+            album        TEXT    NOT NULL DEFAULT 'Unknown Album',
+            duration     REAL    NOT NULL DEFAULT 0.0,
+            indexed_at   TEXT    NOT NULL,
+            valence      REAL,
+            energy       REAL,
+            danceability REAL,
+            bpm          REAL,
+            key          INTEGER,
+            mode         INTEGER
         )
     """)
+
+    # Migration: add new columns to existing DBs that don't have them yet
+    # ALTER TABLE ADD COLUMN is safe to run even if migration was partial
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(songs)").fetchall()
+    }
+    new_cols = {
+        "valence":      "REAL",
+        "energy":       "REAL",
+        "danceability": "REAL",
+        "bpm":          "REAL",
+        "key":          "INTEGER",
+        "mode":         "INTEGER",
+    }
+    for col, col_type in new_cols.items():
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE songs ADD COLUMN {col} {col_type}")
+            print(f"[db] Migrated: added column '{col}'")
+
     conn.commit()
     if not _is_session_conn(conn):
         conn.close()
@@ -140,22 +173,31 @@ def hash_file(filepath: str, chunk_size: int = 65536) -> str:
 # ---------------------------------------------------------------------------
 
 def insert_song(
-    filepath: str,
-    file_hash: str,
-    title: str,
-    artist: str,
-    album: str,
-    duration: float,
+    filepath:     str,
+    file_hash:    str,
+    title:        str,
+    artist:       str,
+    album:        str,
+    duration:     float,
+    valence:      float | None = None,
+    energy:       float | None = None,
+    danceability: float | None = None,
+    bpm:          float | None = None,
+    key:          int   | None = None,
+    mode:         int   | None = None,
 ) -> int:
     """Insert a new song row. Returns the new row id."""
     now = datetime.now(timezone.utc).isoformat()
     conn = _connect()
     cursor = conn.execute(
         """
-        INSERT INTO songs (filepath, file_hash, title, artist, album, duration, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO songs
+            (filepath, file_hash, title, artist, album, duration, indexed_at,
+             valence, energy, danceability, bpm, key, mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (filepath, file_hash, title, artist, album, duration, now),
+        (filepath, file_hash, title, artist, album, duration, now,
+         valence, energy, danceability, bpm, key, mode),
     )
     conn.commit()
     row_id = cursor.lastrowid
@@ -171,6 +213,28 @@ def update_song_hash(song_id: int, file_hash: str) -> None:
     conn.execute(
         "UPDATE songs SET file_hash = ?, indexed_at = ? WHERE id = ?",
         (file_hash, now, song_id),
+    )
+    conn.commit()
+    if not _is_session_conn(conn):
+        conn.close()
+
+
+def update_song_features(
+    song_id:      int,
+    valence:      float,
+    energy:       float,
+    danceability: float,
+    bpm:          float,
+    key:          int,
+    mode:         int,
+) -> None:
+    """Update audio features for an existing song row."""
+    conn = _connect()
+    conn.execute(
+        """UPDATE songs
+           SET valence=?, energy=?, danceability=?, bpm=?, key=?, mode=?
+           WHERE id=?""",
+        (valence, energy, danceability, bpm, key, mode, song_id),
     )
     conn.commit()
     if not _is_session_conn(conn):

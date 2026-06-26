@@ -19,6 +19,7 @@ from werkzeug.utils import secure_filename
 
 import db
 import similarity
+from valence import format_key
 from config import (
     FLASK_PORT,
     MAX_UPLOAD_BYTES,
@@ -69,8 +70,26 @@ def _error(msg: str, code: int = 400):
 
 @app.route("/")
 def index():
-    """Serve the frontend."""
-    return app.send_static_file("index.html")
+    """Serve the frontend with the correct API URL injected."""
+    import socket
+    # Get the host the browser used to reach this page
+    # so the JS points back to the same machine, not hardcoded localhost
+    host = request.host  # e.g. "192.168.1.45:5000" or "localhost:5000"
+    api_url = f"{request.scheme}://{host}"
+
+    frontend_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "frontend", "index.html"
+    )
+    with open(frontend_path, "r") as f:
+        html = f.read()
+
+    # Replace the hardcoded localhost API URL with the actual server address
+    html = html.replace(
+        "const API = 'http://localhost:5000'",
+        f"const API = '{api_url}'"
+    )
+    return html, 200, {"Content-Type": "text/html"}
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -106,11 +125,16 @@ def library():
         "count": len(songs),
         "songs": [
             {
-                "id":       s["id"],
-                "title":    s["title"],
-                "artist":   s["artist"],
-                "album":    s["album"],
-                "duration": round(s["duration"], 1),
+                "id":          s["id"],
+                "title":       s["title"],
+                "artist":      s["artist"],
+                "album":       s["album"],
+                "duration":    round(s["duration"], 1),
+                "valence":     round(s["valence"], 3) if s["valence"] is not None else None,
+                "energy":      round(s["energy"], 3)  if s["energy"]  is not None else None,
+                "danceability":round(s["danceability"], 3) if s["danceability"] is not None else None,
+                "bpm":         round(s["bpm"], 1)     if s["bpm"]     is not None else None,
+                "key_label":   format_key(s["key"], s["mode"]) if s["key"] is not None else None,
             }
             for s in songs
         ],
@@ -196,6 +220,99 @@ def upload():
         "result_count":   len(results),
         "low_confidence_warning": any_low_confidence,
         "results": [r.to_dict() for r in results],
+    })
+
+
+@app.route("/taste", methods=["POST"])
+def taste():
+    """
+    Multi-song taste profile search.
+    Accepts 2-5 songs, embeds each one, averages the vectors into a
+    single centroid, then searches the index against that centroid.
+    This gives a much better signal of actual taste than a single song.
+
+    Form fields:
+        files   — 2-5 audio files (field name: "files")
+        top_n   — number of results (optional, default DEFAULT_TOP_N)
+    """
+    if not similarity.is_ready():
+        return _error("No index found. Run the indexer first.", 503)
+
+    files = request.files.getlist("files")
+    if not files or len(files) < 2:
+        return _error("Upload at least 2 songs to build a taste profile.")
+    if len(files) > 5:
+        return _error("Maximum 5 songs for a taste profile.")
+
+    for f in files:
+        if not _allowed(f.filename):
+            return _error(f"Unsupported format in '{f.filename}'.")
+
+    try:
+        top_n = int(request.form.get("top_n", DEFAULT_TOP_N))
+        top_n = max(1, min(top_n, 50))
+    except ValueError:
+        top_n = DEFAULT_TOP_N
+
+    # Save all uploads to temp files
+    tmp_paths = []
+    for f in files:
+        safe_name = f"{uuid.uuid4().hex}_{secure_filename(f.filename)}"
+        tmp_path  = os.path.join(UPLOAD_DIR, safe_name)
+        f.save(tmp_path)
+        tmp_paths.append((f.filename, tmp_path))
+
+    vectors    = []
+    failed     = []
+    succeeded  = []
+
+    try:
+        with _extraction_lock:
+            for filename, tmp_path in tmp_paths:
+                try:
+                    vec = get_embedding(tmp_path)
+                    vectors.append(vec)
+                    succeeded.append(filename)
+                except (AudioLoadError, AudioTooShortError,
+                        SilentAudioError, UnsupportedFormatError) as e:
+                    failed.append({"file": filename, "reason": str(e)})
+                except Exception as e:
+                    failed.append({"file": filename, "reason": f"Unexpected: {e}"})
+    finally:
+        for _, tmp_path in tmp_paths:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    if len(vectors) < 2:
+        return _error(
+            f"Not enough songs embedded successfully (need 2, got {len(vectors)}). "
+            f"Failures: {[f['reason'] for f in failed]}"
+        )
+
+    # Average all vectors into a single taste centroid then re-normalise
+    # so it sits on the unit sphere and cosine similarity still works correctly
+    import numpy as np
+    centroid = np.mean(np.stack(vectors), axis=0).astype(np.float32)
+    norm = np.linalg.norm(centroid)
+    if norm > 0:
+        centroid = centroid / norm
+
+    try:
+        results = similarity.find_similar(centroid, top_n=top_n)
+    except IndexNotReadyError as e:
+        return _error(str(e), 503)
+    except Exception as e:
+        return _error(f"Search failed: {e}", 500)
+
+    any_low_confidence = any(r.low_confidence for r in results)
+
+    return jsonify({
+        "mode":               "taste_profile",
+        "songs_used":         succeeded,
+        "songs_failed":       failed,
+        "result_count":       len(results),
+        "low_confidence_warning": any_low_confidence,
+        "results":            [r.to_dict() for r in results],
     })
 
 

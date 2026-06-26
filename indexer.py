@@ -27,6 +27,7 @@ from mutagen import File as MutagenFile
 from tqdm import tqdm
 
 import db
+from valence import extract_features
 from config import (
     EMBEDDING_DIM,
     FAISS_ID_MAP_PATH,
@@ -50,14 +51,20 @@ BATCH_SIZE = 50   # process → index → save to disk every N songs
 
 @dataclass
 class SongItem:
-    filepath:  str
-    title:     str
-    artist:    str
-    album:     str
-    duration:  float
-    file_hash: str
-    vector:    np.ndarray
-    db_id:     int | None = None   # set after DB insert
+    filepath:     str
+    title:        str
+    artist:       str
+    album:        str
+    duration:     float
+    file_hash:    str
+    vector:       np.ndarray
+    valence:      float | None = None
+    energy:       float | None = None
+    danceability: float | None = None
+    bpm:          float | None = None
+    key:          int   | None = None
+    mode:         int   | None = None
+    db_id:        int   | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -200,15 +207,31 @@ def _process_batch(
         meta      = _extract_metadata(filepath)
         file_hash = db.hash_file(filepath)
 
+        # Extract valence/energy/danceability/key/bpm
+        # Uses the already-loaded audio — no extra file read needed
+        try:
+            from config import SAMPLE_RATE
+            import librosa as _librosa
+            _audio, _ = _librosa.load(filepath, sr=SAMPLE_RATE, mono=True, duration=120)
+            feats = extract_features(_audio, SAMPLE_RATE)
+        except Exception:
+            feats = {}   # non-fatal — song still gets indexed without features
+
         item = SongItem(
-            filepath  = filepath,
-            title     = meta["title"],
-            artist    = meta["artist"],
-            album     = meta["album"],
-            duration  = meta["duration"],
-            file_hash = file_hash,
-            vector    = vector,
-            db_id     = existing["id"] if existing else None,
+            filepath     = filepath,
+            title        = meta["title"],
+            artist       = meta["artist"],
+            album        = meta["album"],
+            duration     = meta["duration"],
+            file_hash    = file_hash,
+            vector       = vector,
+            valence      = feats.get("valence"),
+            energy       = feats.get("energy"),
+            danceability = feats.get("danceability"),
+            bpm          = feats.get("bpm"),
+            key          = feats.get("key"),
+            mode         = feats.get("mode"),
+            db_id        = existing["id"] if existing else None,
         )
         embedded.append(item)
 
@@ -227,14 +250,17 @@ def _process_batch(
     if new_items:
         rows = [
             (it.filepath, it.file_hash, it.title, it.artist,
-             it.album, it.duration, now)
+             it.album, it.duration, now,
+             it.valence, it.energy, it.danceability,
+             it.bpm, it.key, it.mode)
             for it in new_items
         ]
         conn = db._connect()
         cursor = conn.executemany(
             """INSERT OR IGNORE INTO songs
-               (filepath, file_hash, title, artist, album, duration, indexed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (filepath, file_hash, title, artist, album, duration, indexed_at,
+                valence, energy, danceability, bpm, key, mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         conn.commit()

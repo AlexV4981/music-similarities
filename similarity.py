@@ -40,11 +40,16 @@ class SearchResult:
     artist:         str
     album:          str
     duration:       float
-    score:          float   # cosine similarity 0.0 - 1.0
-    low_confidence: bool    # True if score < LOW_CONFIDENCE_THRESHOLD
+    score:          float
+    low_confidence: bool
+    valence:        float | None = None
+    energy:         float | None = None
+    danceability:   float | None = None
+    bpm:            float | None = None
+    key_label:      str   | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "rank":           self.rank,
             "song_id":        self.song_id,
             "title":          self.title,
@@ -56,6 +61,12 @@ class SearchResult:
             "low_confidence": self.low_confidence,
             "filepath":       self.filepath,
         }
+        if self.valence      is not None: d["valence"]      = round(self.valence,      2)
+        if self.energy       is not None: d["energy"]       = round(self.energy,       2)
+        if self.danceability is not None: d["danceability"] = round(self.danceability, 2)
+        if self.bpm          is not None: d["bpm"]          = round(self.bpm,          1)
+        if self.key_label    is not None: d["key_label"]    = self.key_label
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +201,11 @@ def find_similar(
         # Clamp score to [0, 1] — floating point can give tiny negatives
         clamped_score = float(max(0.0, min(1.0, score)))
 
+        from valence import format_key
+        key_label = None
+        if song["key"] is not None and song["mode"] is not None:
+            key_label = format_key(song["key"], song["mode"])
+
         results.append(SearchResult(
             rank           = len(results) + 1,
             song_id        = db_id,
@@ -200,6 +216,11 @@ def find_similar(
             duration       = song["duration"],
             score          = clamped_score,
             low_confidence = clamped_score < LOW_CONFIDENCE_THRESHOLD,
+            valence        = song["valence"],
+            energy         = song["energy"],
+            danceability   = song["danceability"],
+            bpm            = song["bpm"],
+            key_label      = key_label,
         ))
 
         if len(results) >= top_n:

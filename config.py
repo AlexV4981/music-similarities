@@ -1,5 +1,10 @@
 import os
 
+# Silence the HuggingFace unauthenticated request warning
+# The CLAP model is free — after first download it runs fully offline
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "0")  # set to "1" after first download to force offline
+
 # Base paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -11,7 +16,10 @@ FAISS_INDEX_PATH = os.path.join(DATA_DIR, "vectors.index")
 FAISS_ID_MAP_PATH = os.path.join(DATA_DIR, "id_map.json")  # maps FAISS int ID -> DB song ID
 
 # CLAP model
-CLAP_MODEL_ID = "laion/clap-htsat-unfused"
+# Swapped from laion/clap-htsat-unfused — this checkpoint is trained
+# purely on music data (not general audio) so embeddings are more
+# relevant for song-to-song similarity in a personal library
+CLAP_MODEL_ID = "laion/larger_clap_music"
 EMBEDDING_DIM = 512
 
 # Audio processing
